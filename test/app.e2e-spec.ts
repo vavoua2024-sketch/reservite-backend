@@ -84,7 +84,14 @@ describe('API RESERVITE (bout en bout)', () => {
     });
 
     it('rejette un mot de passe trop court', async () => {
-      await http().post('/auth/client/register').send({ name: 'X Y', email: 'court@example.com', password: '123' }).expect(400);
+      const res = await http().post('/auth/client/register').send({ name: 'X Y', email: 'court@example.com', password: '123' }).expect(400);
+      expect(res.body.error).toMatch(/8 caractères/);
+    });
+
+    it('renvoie les erreurs de validation en français', async () => {
+      const res = await http().post('/colis').set(auth('parcel')).send({ senderName: 'A', price: 'abc' }).expect(400);
+      expect(res.body.error).toMatch(/senderName : valeur trop courte/);
+      expect(res.body.error).not.toMatch(/must be/);
     });
   });
 
