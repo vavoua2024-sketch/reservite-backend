@@ -1,0 +1,404 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  COMPANY_ADMIN
+  GARE_MANAGER
+  CASHIER
+  CONTROLLER
+  PARCEL_AGENT
+  CLIENT
+}
+
+enum VoyageStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+  COMPLETED
+}
+
+enum TicketStatus {
+  PENDING
+  VALID
+  SCANNED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  MOBILE_MONEY
+  CASH
+}
+
+enum ColisStatus {
+  REGISTERED
+  IN_TRANSIT
+  ARRIVED
+  DELIVERED
+}
+
+enum ProformaStatus {
+  OPEN
+  ACCEPTED
+  CLOSED
+}
+
+enum OfferStatus {
+  PENDING
+  OFFERED
+  ACCEPTED
+  REFUSED
+}
+
+enum ReclamationStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+}
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  phone     String?
+  email     String?
+  logoKey   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  users           User[]
+  gares           Gare[]
+  trajets         Trajet[]
+  vehicules       Vehicule[]
+  voyages         Voyage[]
+  colis           Colis[]
+  rentalVehicles  RentalVehicle[]
+  offers          ProformaOffer[]
+  reclamations    Reclamation[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  phone        String?
+  role         Role
+  isActive     Boolean  @default(true)
+  companyId    String?
+  gareId       String?
+  createdAt    DateTime @default(now())
+
+  company Company? @relation(fields: [companyId], references: [id])
+  gare    Gare?    @relation(fields: [gareId], references: [id])
+
+  bookings       Booking[]
+  proformas      Proforma[]
+  reclamations   Reclamation[]
+  notifications  Notification[]
+  deviceTokens   DeviceToken[]
+  refreshTokens  RefreshToken[]
+  resetTokens    PasswordResetToken[]
+  scannedTickets Ticket[]        @relation("ScannedBy")
+
+  @@index([companyId])
+  @@index([role])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Gare {
+  id        String   @id @default(cuid())
+  name      String
+  city      String
+  address   String?
+  companyId String
+  createdAt DateTime @default(now())
+
+  company  Company @relation(fields: [companyId], references: [id])
+  users    User[]
+  voyages  Voyage[]
+
+  @@index([companyId])
+}
+
+model Trajet {
+  id           String   @id @default(cuid())
+  fromCity     String
+  toCity       String
+  basePrice    Int
+  durationMin  Int?
+  companyId    String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  company Company  @relation(fields: [companyId], references: [id])
+  voyages Voyage[]
+
+  @@index([companyId])
+  @@index([fromCity, toCity])
+}
+
+model Vehicule {
+  id        String   @id @default(cuid())
+  plate     String
+  model     String?
+  capacity  Int
+  companyId String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  company Company  @relation(fields: [companyId], references: [id])
+  voyages Voyage[]
+
+  @@unique([companyId, plate])
+}
+
+model Voyage {
+  id          String       @id @default(cuid())
+  trajetId    String
+  vehiculeId  String
+  gareId      String?
+  companyId   String
+  departureAt DateTime
+  price       Int
+  seatsTotal  Int
+  status      VoyageStatus @default(DRAFT)
+  createdAt   DateTime     @default(now())
+
+  trajet   Trajet   @relation(fields: [trajetId], references: [id])
+  vehicule Vehicule @relation(fields: [vehiculeId], references: [id])
+  gare     Gare?    @relation(fields: [gareId], references: [id])
+  company  Company  @relation(fields: [companyId], references: [id])
+  tickets  Ticket[]
+  bookings Booking[]
+
+  @@index([companyId, departureAt])
+  @@index([status, departureAt])
+}
+
+model Booking {
+  id            String        @id @default(cuid())
+  voyageId      String
+  userId        String?
+  soldById      String?
+  customerName  String?
+  customerPhone String?
+  seatsCount    Int
+  subtotal      Int
+  fee           Int
+  total         Int
+  paymentMethod PaymentMethod
+  paymentStatus PaymentStatus @default(PENDING)
+  paymentRef    String?       @unique
+  paymentUrl    String?
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+
+  voyage  Voyage   @relation(fields: [voyageId], references: [id])
+  user    User?    @relation(fields: [userId], references: [id])
+  tickets Ticket[]
+
+  @@index([userId])
+  @@index([voyageId])
+}
+
+model Ticket {
+  id            String       @id @default(cuid())
+  bookingId     String
+  voyageId      String
+  seatNumber    Int
+  code          String       @unique
+  passengerName String?
+  status        TicketStatus @default(PENDING)
+  holdExpiresAt DateTime?
+  price         Int
+  refundAmount  Int          @default(0)
+  cancelledAt   DateTime?
+  scannedAt     DateTime?
+  scannedById   String?
+  createdAt     DateTime     @default(now())
+
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  voyage    Voyage  @relation(fields: [voyageId], references: [id])
+  scannedBy User?   @relation("ScannedBy", fields: [scannedById], references: [id])
+
+  @@index([voyageId, status])
+  @@index([bookingId])
+}
+
+model Colis {
+  id            String      @id @default(cuid())
+  trackingCode  String      @unique
+  companyId     String
+  senderName    String
+  senderPhone   String
+  receiverName  String
+  receiverPhone String
+  description   String?
+  weightKg      Float?
+  price         Int
+  originCity    String
+  destCity      String
+  status        ColisStatus @default(REGISTERED)
+  createdById   String?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  company Company   @relation(fields: [companyId], references: [id])
+  events  ColisEvent[]
+  sms     SmsLog[]
+
+  @@index([companyId])
+}
+
+model ColisEvent {
+  id        String      @id @default(cuid())
+  colisId   String
+  status    ColisStatus
+  note      String?
+  createdAt DateTime    @default(now())
+  colis     Colis       @relation(fields: [colisId], references: [id], onDelete: Cascade)
+
+  @@index([colisId])
+}
+
+model SmsLog {
+  id        String   @id @default(cuid())
+  to        String
+  body      String
+  status    String   @default("LOGGED")
+  colisId   String?
+  createdAt DateTime @default(now())
+  colis     Colis?   @relation(fields: [colisId], references: [id], onDelete: SetNull)
+}
+
+model RentalVehicle {
+  id           String   @id @default(cuid())
+  companyId    String
+  name         String
+  type         String
+  seats        Int
+  pricePerDay  Int
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  company Company         @relation(fields: [companyId], references: [id])
+  offers  ProformaOffer[]
+
+  @@index([companyId])
+}
+
+model Proforma {
+  id          String         @id @default(cuid())
+  clientId    String
+  startDate   DateTime
+  endDate     DateTime
+  passengers  Int
+  details     String?
+  status      ProformaStatus @default(OPEN)
+  createdAt   DateTime       @default(now())
+
+  client User            @relation(fields: [clientId], references: [id])
+  offers ProformaOffer[]
+
+  @@index([clientId])
+}
+
+model ProformaOffer {
+  id              String      @id @default(cuid())
+  proformaId      String
+  companyId       String
+  rentalVehicleId String?
+  price           Int?
+  message         String?
+  status          OfferStatus @default(PENDING)
+  respondedAt     DateTime?
+  createdAt       DateTime    @default(now())
+
+  proforma      Proforma       @relation(fields: [proformaId], references: [id], onDelete: Cascade)
+  company       Company        @relation(fields: [companyId], references: [id])
+  rentalVehicle RentalVehicle? @relation(fields: [rentalVehicleId], references: [id])
+
+  @@unique([proformaId, companyId])
+  @@index([companyId, status])
+}
+
+model Reclamation {
+  id        String            @id @default(cuid())
+  userId    String
+  companyId String?
+  subject   String
+  message   String
+  status    ReclamationStatus @default(OPEN)
+  response  String?
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  user    User     @relation(fields: [userId], references: [id])
+  company Company? @relation(fields: [companyId], references: [id])
+
+  @@index([userId])
+  @@index([companyId, status])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  title     String
+  body      String
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model DeviceToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  platform  String?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model FileAsset {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  ownerId   String?
+  mimeType  String?
+  createdAt DateTime @default(now())
+}

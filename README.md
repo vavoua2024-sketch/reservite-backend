@@ -1,35 +1,26 @@
-# RESERVITE — Backend réel
+# RESERVITE — API (NestJS)
 
-Ceci est le **vrai serveur** de RESERVITE : une API complète, avec une vraie base de
-données et de vrais mots de passe chiffrés. Contrairement à la démo construite dans
-Claude (qui utilisait `window.storage`, propre à l'environnement Claude), ce code
-**tourne n'importe où** — sur votre ordinateur, ou sur un vrai serveur en ligne.
+Point d'entrée unique de la plateforme : le **web** (`reservite-backoffice-web`, Next.js) et le **mobile**
+(`reservite-mobile-app`, React Native / Expo) appellent tous deux cette API. Toute la logique métier, l'authentification
+et les permissions sont ici ; aucun client ne parle directement à la base.
 
-## 1. Installation locale (pour tester)
+**Stack** : Node.js 20+, NestJS 11, TypeScript, Prisma 5, PostgreSQL 16, JWT, bcrypt, Swagger.
 
-Prérequis : [Node.js](https://nodejs.org) version 18 ou plus, installé sur votre machine.
+## 1. Démarrer en local
 
-```bash
-cd reservite-backend
-cp .env.example .env
-npm run setup
-```
-
-La commande `npm run setup` fait tout d'un coup : installe les dépendances, crée la
-base de données SQLite (`dev.db`, un simple fichier — rien à installer en plus), et
-la remplit avec les mêmes données de démonstration qu'on a utilisées jusqu'ici
-(mêmes comptes, mêmes compagnies, mêmes trajets).
-
-Puis démarrez le serveur :
+Prérequis : Node.js 20 ou plus, et PostgreSQL (le plus simple : Docker).
 
 ```bash
-npm run dev
+docker compose up -d          # base PostgreSQL locale (ou utilisez votre propre PostgreSQL)
+cp .env.example .env          # puis adaptez JWT_SECRET (32 caractères minimum)
+npm run setup                 # installe, crée les tables, charge les données de démonstration
+npm run start:dev
 ```
 
-Le serveur tourne sur `http://localhost:4000`. Testez qu'il fonctionne en ouvrant
-`http://localhost:4000/health` dans un navigateur — vous devez voir `{"status":"ok"}`.
+- Santé : http://localhost:4000/health
+- Documentation interactive (Swagger) : http://localhost:4000/docs (hors production)
 
-## 2. Comptes de démonstration (identiques à ceux utilisés jusqu'ici)
+## 2. Comptes de démonstration (jeu de données `npm run prisma:seed`)
 
 | Rôle | Email | Mot de passe |
 |---|---|---|
@@ -40,104 +31,83 @@ Le serveur tourne sur `http://localhost:4000`. Testez qu'il fonctionne en ouvran
 | Contrôleur | ibrahim.coulibaly@utb.ci | scan2024 |
 | Agent colis & bagages | fatoumata.sangare@utb.ci | colis2024 |
 | Client (app) | aya.ndri@gmail.com | client2024 |
+| Admin Compagnie (SBTA, 2e compagnie) | admin@sbta.ci | sbta2024 |
 
-## 3. Comment appeler l'API
+⚠️ Ces comptes n'existent que pour le développement. Le seed refuse de tourner avec `NODE_ENV=production`.
 
-Toutes les routes protégées attendent un jeton dans l'en-tête `Authorization`.
+## 3. Authentification
 
-**Connexion personnel :**
+- Personnel (web) : `POST /auth/staff/login` — Clients et contrôleurs (mobile) : `POST /auth/client/login`.
+- La réponse contient `accessToken` (court : 1 h) et `refreshToken` (30 jours, à usage unique).
+  Renouvellement : `POST /auth/refresh`. Déconnexion : `POST /auth/logout`.
+- Chaque requête : `Authorization: Bearer <accessToken>`.
+- Le rôle et la compagnie sont relus en base à chaque requête : un compte désactivé perd l'accès immédiatement.
+
+## 4. Routes
+
+| Préfixe | Contenu | Qui |
+|---|---|---|
+| `/auth` | connexion, inscription client, refresh, mot de passe oublié, `me` | public puis connecté |
+| `/companies` | liste, création (avec son admin), modification | création : SuperAdmin |
+| `/gares`, `/trajets`, `/vehicules`, `/rental-vehicles` | CRUD limité à la compagnie | Admin Compagnie / SuperAdmin |
+| `/voyages` | recherche publique, création, publication, annulation, billets d'un voyage | création : Caissier et plus |
+| `/tickets` | `book`, liste, détail, `cancel`, `scan` ; `/bookings/:id` | client, guichet, contrôleur |
+| `/colis` | enregistrement, statut, `track/:code` public | Agent colis et plus |
+| `/proforma` | demande de location multi-compagnies, offres, acceptation | client, Admin Compagnie |
+| `/users`, `/clients` | personnel de la compagnie, clients | Admin Compagnie / SuperAdmin |
+| `/reclamations` | dépôt (client), traitement (personnel) | |
+| `/notifications` | liste, lu, enregistrement du jeton push | connecté |
+| `/storage` | URL signées S3 (envoi et lecture de fichiers) | connecté |
+| `/payments/cinetpay/webhook` | notification de paiement | CinetPay |
+
+Erreurs : toujours `{ "error": "message lisible" }`.
+
+## 5. Règles métier (toutes testées)
+
+- **Anti-survente** : la réservation verrouille le voyage (`SELECT … FOR UPDATE`) pendant qu'elle compte les places.
+  Test : 8 réservations simultanées pour 3 places → exactement 3 réussissent.
+- **Un billet par place**, avec code unique à scanner ; chaque billet se scanne une seule fois.
+- **Frais de service 5 %** (`SERVICE_FEE_RATE`), calculés uniquement côté serveur.
+- **Annulation** : client jusqu'à 2 h avant le départ (`CANCEL_LIMIT_HOURS`) ; la compagnie peut annuler à tout moment.
+  Remboursement dû = prix du billet **sans** les frais de service. ⚠️ Règle par défaut, à confirmer avec le commanditaire ;
+  le remboursement réel via CinetPay n'est pas automatisé.
+- **Places en attente de paiement** : réservées `SEAT_HOLD_MINUTES` (15 min), puis libérées si non payées.
+- **Location** : une demande part vers plusieurs compagnies ; accepter une offre refuse automatiquement les autres.
+- **Isolation** : le personnel d'une compagnie ne voit et ne modifie que les données de sa compagnie.
+- **Suivi de colis public** : sans connexion, sans noms ni téléphones. Chaque changement de statut journalise un SMS.
+
+## 6. Paiement CinetPay
+
+Par défaut `PAYMENT_PROVIDER=simulated` : le paiement est accepté tout de suite (développement). Pour de vrais paiements :
+
+1. Créez un compte marchand CinetPay, renseignez `CINETPAY_API_KEY`, `CINETPAY_SITE_ID`, `PUBLIC_API_URL` (adresse publique de l'API,
+   en HTTPS) et `PAYMENT_RETURN_URL`, puis mettez `PAYMENT_PROVIDER=cinetpay`.
+2. L'app ouvre `paymentUrl` ; CinetPay appelle ensuite `POST /payments/cinetpay/webhook`.
+3. Le webhook **n'est jamais cru tel quel** : l'API interroge CinetPay (`/payment/check`) et compare le montant avant de valider les billets.
+4. Les montants sont arrondis à un multiple de 5 (exigence CinetPay en XOF) en ajustant les frais de service.
+
+⚠️ L'intégration est écrite d'après la documentation CinetPay mais n'a pas pu être testée avec de vrais identifiants : à valider
+en environnement de test CinetPay avant la production.
+
+## 7. SMS, e-mail, push, stockage
+
+- **SMS / e-mail** : `SMS_PROVIDER=log` et `EMAIL_PROVIDER=log` écrivent dans les journaux et en base. Branchez un fournisseur dans
+  `src/notifications/notifications.service.ts` (Twilio, agrégateur local, Resend, Brevo...).
+- **Push** : notifications Expo, envoyées si l'appareil a enregistré son jeton (`POST /notifications/device-token`).
+- **Fichiers** : stockage compatible S3 (AWS S3, Cloudflare R2, Scaleway) par URL signées ; renseignez les variables `S3_*`.
+
+## 8. Tests
+
 ```bash
-curl -X POST http://localhost:4000/api/auth/staff/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"fatou.diarra@utb.ci","password":"caisse2024"}'
-```
-La réponse contient un `token`. Utilisez-le ensuite dans chaque appel :
-```bash
-curl http://localhost:4000/api/tickets \
-  -H "Authorization: Bearer LE_TOKEN_RECU"
+npm test            # règles métier pures
+npm run test:e2e    # API complète sur la base de DATABASE_URL (chargez d'abord le seed)
 ```
 
-## 4. Passer en production (mise en ligne réelle)
+La CI GitHub (`.github/workflows/ci.yml`) lance les deux sur un PostgreSQL éphémère.
 
-### a) Changer de base de données
-SQLite convient pour tester, mais pour un vrai site avec plusieurs utilisateurs en
-même temps, utilisez PostgreSQL — gratuit pour démarrer chez
-[Supabase](https://supabase.com), [Neon](https://neon.tech) ou [Railway](https://railway.app).
+## 9. Mise en production
 
-Dans `prisma/schema.prisma`, changez :
-```prisma
-datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
-}
-```
-en :
-```prisma
-datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
-}
-```
-Puis mettez la vraie adresse Postgres dans `DATABASE_URL` (fichier `.env`), et relancez :
-```bash
-npx prisma migrate dev --name switch-to-postgres
-```
-
-### b) Héberger le serveur
-Options simples et abordables pour la Côte d'Ivoire (peu ou pas de carte bancaire
-internationale nécessaire selon l'offre) :
-- [Render](https://render.com) — gratuit pour démarrer, très simple
-- [Railway](https://railway.app)
-- [Fly.io](https://fly.io)
-
-Dans tous les cas : connectez votre dépôt GitHub, indiquez `npm start` comme
-commande de démarrage, et renseignez les mêmes variables que dans `.env.example`.
-
-### c) Activer les vrais paiements
-Voir `src/payments/cinetpay.js` — il suffit de renseigner vos clés CinetPay dans
-`.env` une fois votre compte marchand créé. Aucune autre modification de code
-n'est nécessaire.
-
-### d) Activer les vrais SMS
-Voir le commentaire `TODO production` dans `src/routes/colis.routes.js` — à
-brancher sur un fournisseur SMS (Twilio, ou un agrégateur local).
-
-### e) Sécuriser `JWT_SECRET`
-Générez une vraie valeur secrète avant la mise en ligne :
-```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
-```
-
-## 5. Brancher le frontend (backoffice web + app mobile)
-
-Les fichiers React qu'on a construits (`reservite-backoffice.jsx` et
-`reservite-app-client.jsx`) utilisent actuellement `window.storage`, propre à
-Claude. Pour les connecter à cette vraie API, il faut remplacer ces appels par de
-vrais appels réseau (`fetch`) vers les routes ci-dessus — par exemple :
-
-```js
-// Avant (démo Claude) :
-await window.storage.set(STORAGE_KEY, JSON.stringify(data), false);
-
-// Après (vraie API) :
-await fetch("https://votre-api.com/api/tickets/book", {
-  method: "POST",
-  headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-  body: JSON.stringify({ voyageId, seats, payment }),
-});
-```
-
-C'est un travail de connexion écran par écran — demandez-moi de le faire si vous
-voulez que je m'en occupe.
-
-## 6. Ce qui est déjà résolu dans ce backend
-
-- Mots de passe chiffrés (jamais stockés en clair)
-- Anti-survente : la réservation de billets vérifie les places restantes dans une
-  transaction, pour empêcher deux clients de réserver la même place en même temps
-- Génération d'un billet individuel par place (scan indépendant par le contrôleur)
-- Calcul centralisé des frais de service (5%)
-- Règle d'annulation à 2h du départ
-- Demande de location à plusieurs compagnies + refus automatique des concurrents
-  à l'acceptation d'une offre
-- Suivi de colis public (sans connexion), avec journal de SMS
+- Base PostgreSQL gérée (Neon, Supabase, Railway...). `npx prisma migrate deploy` applique les migrations.
+- Image Docker fournie (`Dockerfile`) : Render, Railway ou Fly.io.
+- Avant la mise en ligne : `JWT_SECRET` aléatoire (`node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`),
+  `CORS_ORIGIN` limité aux adresses réelles du web, `NODE_ENV=production`, pas de seed.

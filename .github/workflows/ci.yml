@@ -1,0 +1,33 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: reservite
+          POSTGRES_PASSWORD: reservite
+          POSTGRES_DB: reservite
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U reservite" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://reservite:reservite@localhost:5432/reservite?schema=public
+      JWT_SECRET: ci-secret-ci-secret-ci-secret-ci-secret-1234
+      PAYMENT_PROVIDER: simulated
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma migrate deploy
+      - run: npm run prisma:seed
+      - run: npm run build
+      - run: npm test
+      - run: npm run test:e2e
